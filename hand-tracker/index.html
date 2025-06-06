@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Gesture Drawing App</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #111;
+            color: #0f0;
+            font-family: monospace;
+            user-select: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #video,
+        #canvasVideo,
+        #canvasDraw {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: scaleX(-1);
+        }
+
+        #info {
+            position: fixed;
+            bottom: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            max-width: 640px;
+            text-align: center;
+        }
+
+        #gestureDisplay {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <video id="video" width="640" height="480" autoplay muted playsinline></video>
+    <canvas id="canvasDraw" width="640" height="480"></canvas>
+    <canvas id="canvasVideo" width="640" height="480"></canvas>
+    <div id="info">Initializing...</div>
+    <div id="gestureDisplay">Gesture: None</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasVideo = document.getElementById('canvasVideo');
+        const canvasDraw = document.getElementById('canvasDraw');
+        const videoCtx = canvasVideo.getContext('2d');
+        const drawCtx = canvasDraw.getContext('2d');
+        const info = document.getElementById('info');
+        const gestureDisplay = document.getElementById('gestureDisplay');
+
+        let drawing = false;
+        let lastPos = null;
+        let lastSpokenGestures = [];
+        let currentColor = '#00FFFF';
+
+        const hands = new Hands({
+            locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => await hands.send({ image: videoElement }),
+            width: 640,
+            height: 480
+        });
+        camera.start();
+
+        function speak(text) {
+            if (!window.speechSynthesis || !text) return;
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'en-US';
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function onResults(results) {
+            videoCtx.save();
+            videoCtx.clearRect(0, 0, canvasVideo.width, canvasVideo.height);
+            videoCtx.drawImage(results.image, 0, 0, canvasVideo.width, canvasVideo.height);
+
+            let gestures = [];
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                lastSpokenGestures.length = results.multiHandLandmarks.length;
+
+                results.multiHandLandmarks.forEach((landmarks, i) => {
+                    drawConnectors(videoCtx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 3 });
+                    drawLandmarks(videoCtx, landmarks, { color: '#FF0000', lineWidth: 2 });
+
+                    const fingers = countFingers(landmarks);
+                    const gesture = recognizeGesture(landmarks, fingers);
+                    gestures.push(`Hand ${i + 1}: ${gesture}`);
+
+                    if (!lastSpokenGestures[i]) lastSpokenGestures[i] = '';
+                    if (lastSpokenGestures[i] !== gesture) {
+                        lastSpokenGestures[i] = gesture;
+                        speak(`Hand ${i + 1}: ${gesture}`);
+                    }
+
+                    // Change drawing color based on gesture
+                    if (gesture === 'Thumbs Up') currentColor = '#FF0000';
+                    if (gesture === 'Fist') currentColor = '#00FFFF';
+                    if (gesture === 'Pointing') currentColor = '#FFFF00';
+
+                    if (gesture === 'Open Palm' || gesture === 'Pointing') {
+                        const tip = landmarks[8];
+                        const x = tip.x * canvasDraw.width;
+                        const y = tip.y * canvasDraw.height;
+
+                        if (!drawing) {
+                            drawing = true;
+                            lastPos = { x, y };
+                        } else {
+                            drawCtx.strokeStyle = currentColor;
+                            drawCtx.lineWidth = 4;
+                            drawCtx.beginPath();
+                            drawCtx.moveTo(lastPos.x, lastPos.y);
+                            drawCtx.lineTo(x, y);
+                            drawCtx.stroke();
+                            lastPos = { x, y };
+                        }
+                    } else {
+                        drawing = false;
+                        lastPos = null;
+                    }
+                });
+
+                // Clear if both hands are fists
+                if (
+                    results.multiHandLandmarks.length === 2 &&
+                    gestures.every(g => g.includes('Fist'))
+                ) {
+                    drawCtx.clearRect(0, 0, canvasDraw.width, canvasDraw.height);
+                    info.textContent = 'Canvas cleared';
+                    speak("Canvas cleared");
+                }
+            } else {
+                drawing = false;
+                lastPos = null;
+                gestures.push('No hands detected');
+            }
+
+            videoCtx.restore();
+
+            info.textContent = gestures.join(' | ');
+            gestureDisplay.textContent = 'Gesture: ' + gestures.join(' | ');
+        }
+
+        function countFingers(landmarks) {
+            let count = 0;
+            const tips = [8, 12, 16, 20]; // Index, Middle, Ring, Pinky
+            const pips = [6, 10, 14, 18];
+
+            for (let i = 0; i < tips.length; i++) {
+                if (landmarks[tips[i]].y < landmarks[pips[i]].y) count++;
+            }
+
+            // Thumb logic (check horizontal position because thumb is sideways)
+            const thumbTip = landmarks[4];
+            const thumbIP = landmarks[3];
+            if (thumbTip.x < thumbIP.x) count++;
+
+            return count;
+        }
+
+        function recognizeGesture(landmarks, fingers) {
+            const indexUp = landmarks[8].y < landmarks[6].y;
+            const middleUp = landmarks[12].y < landmarks[10].y;
+            const ringUp = landmarks[16].y < landmarks[14].y;
+            const pinkyUp = landmarks[20].y < landmarks[18].y;
+            const thumbUp = landmarks[4].x < landmarks[3].x;
+
+            // 1 middle finger up only → "F*ck you"
+            if (middleUp && !indexUp && !ringUp && !pinkyUp && !thumbUp) {
+                return 'F*ck you';
+            }
+
+            // 1 index finger up only → "Pointing"
+            if (indexUp && !middleUp && !ringUp && !pinkyUp && !thumbUp) {
+                return 'Pointing';
+            }
+
+            // 3 fingers up → "Okay"
+            if (fingers === 3) return 'Okay';
+
+            // 5 fingers up → "Hi"
+            if (fingers === 5) return 'Hi';
+
+            // 0 fingers → Fist
+            if (fingers === 0) return 'Fist';
+
+            // Thumb up (optional)
+            if (
+                fingers === 1 &&
+                thumbUp &&
+                !indexUp && !middleUp && !ringUp && !pinkyUp
+            ) return 'Thumbs Up';
+
+            return 'Unknown';
+        }
+    </script>
+</body>
+
+</html>
